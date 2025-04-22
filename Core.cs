@@ -83,22 +83,6 @@ namespace ProductSum
 #endif
         }
 
-        public override void OnSceneWasLoaded(int buildIndex, string sceneName)
-        {
-            if (sceneName == "Main")
-            {
-                MelonLogger.Msg("Main scene loaded, waiting for player...");
-                MelonCoroutines.Start(WaitForPlayer());
-            }
-            else
-            {
-                hasPlayerSpawned = false;
-
-                if (uiContainer != null)
-                    uiContainer.SetActive(false);
-            }
-        }
-
         private IEnumerator WaitForPlayer()
         {
             while (Player.Local == null || Player.Local.gameObject == null)
@@ -112,6 +96,27 @@ namespace ProductSum
             else if (uiCreated && uiContainer != null)
             {
                 uiContainer.SetActive(true);
+                // update UI after going back to main menu
+                UpdateProductUI();
+            }
+        }
+
+        public override void OnSceneWasLoaded(int buildIndex, string sceneName)
+        {
+            if (sceneName == "Main")
+            {
+                MelonLogger.Msg("Main scene loaded, waiting for player...");
+                MelonCoroutines.Start(WaitForPlayer());
+            }
+            else
+            {
+                hasPlayerSpawned = false;
+                uiCreated = false;
+
+                if (uiContainer != null)
+                    uiContainer.SetActive(false);
+                    GameObject.Destroy(uiContainer);
+                uiContainer = null;
             }
         }
 
@@ -188,7 +193,7 @@ namespace ProductSum
 
             if (!AlwaysOn.Value && Input.GetKeyDown(ParseKeybind(Keybind.Value)))
             {
-                MelonLogger.Msg("were getting into ui with this one");
+                MelonLogger.Msg("Timer started");
                 timerActive = true;
                 timerStartTime = Time.time;
                 UpdateProductUI();
@@ -201,7 +206,7 @@ namespace ProductSum
                     uiContainer.SetActive(false);
             }
 
-            if (uiContainer.activeSelf)
+            if (AlwaysOn.Value || timerActive || uiContainer.activeSelf)
             {
                 UpdateProductUI();
             }
@@ -214,6 +219,7 @@ namespace ProductSum
             {
                 var productMap = new Dictionary<EDealWindow, Dictionary<string, int>>();
                 bool hasValidContracts = false;
+                int validContractCount = 0;
 
                 var contracts = Contract.Contracts;
                 if (contracts != null && contracts.Count > 0)
@@ -223,18 +229,18 @@ namespace ProductSum
                         bool shouldShow = false;
 
 #if MONO
-                if (shouldShowJournalEntryMethod != null)
-                {
-                    try
-                    {
-                        shouldShow = (bool)shouldShowJournalEntryMethod.Invoke(contract, null);
-                    }
-                    catch (Exception ex)
-                    {
-                        MelonLogger.Error($"Reflection error: {ex.Message}");
-                        continue;
-                    }
-                }
+                        if (shouldShowJournalEntryMethod != null)
+                        {
+                            try
+                            {
+                                shouldShow = (bool)shouldShowJournalEntryMethod.Invoke(contract, null);
+                            }
+                            catch (Exception ex)
+                            {
+                                MelonLogger.Error($"Reflection error: {ex.Message}");
+                                continue;
+                            }
+                        }
 #else
                         try
                         {
@@ -250,7 +256,10 @@ namespace ProductSum
                         if (!shouldShow)
                             continue;
 
+                        // count valid contracts
+                        validContractCount++;
                         hasValidContracts = true;
+
                         ProductList productList = contract.ProductList;
                         QuestWindowConfig questWindowConfig = contract.DeliveryWindow;
 
@@ -276,22 +285,9 @@ namespace ProductSum
                             }
                         }
                     }
-                    
-                    // merged time slots for alt display and convenience
-                    var merged = new Dictionary<string, int>();
-                    foreach (var slot in productMap.Values)
-                    {
-                        foreach (var item in slot)
-                        {
-                            if (merged.ContainsKey(item.Key))
-                                merged[item.Key] += item.Value;
-                            else
-                                merged[item.Key] = item.Value;
-                        }
-                    }
-                    
-                    // display if we have more than one
-                    if (hasValidContracts && merged.Count > 1)
+
+                    // at least one valid contract
+                    if (hasValidContracts && validContractCount > 1)
                     {
                         var sb = new System.Text.StringBuilder();
                         sb.AppendLine("Summary:");
@@ -310,6 +306,17 @@ namespace ProductSum
                         }
                         else
                         {
+                            var merged = new Dictionary<string, int>();
+                            foreach (var slot in productMap.Values)
+                            {
+                                foreach (var item in slot)
+                                {
+                                    if (merged.ContainsKey(item.Key))
+                                        merged[item.Key] += item.Value;
+                                    else
+                                        merged[item.Key] = item.Value;
+                                }
+                            }
                             foreach (var item in merged)
                                 sb.AppendLine($"<b>{item.Value}</b>x <i>{item.Key}</i>");
                         }
@@ -329,7 +336,7 @@ namespace ProductSum
                         else if (!shouldShow && uiContainer.activeSelf)
                             uiContainer.SetActive(false);
                     }
-                    else if (uiContainer.activeSelf && !AlwaysOn.Value)
+                    else if (uiContainer.activeSelf)
                     {
                         uiContainer.SetActive(false);
                         timerActive = false;
