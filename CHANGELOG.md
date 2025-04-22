@@ -1,3 +1,10 @@
+## 1.2
+```
+Added packaging split support - summaries can be now split based on packaging. Consider deals: 6x product1, 4x product1. Summary will display product1: 5x baggie, 1x jar
+
+This option is configurable in the config file and is compatible with other options (time slot split).
+```
+
 ## 1.1
 ```
 Added time slot support - summaries can be now split based on time slots.

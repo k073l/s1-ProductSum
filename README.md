@@ -26,5 +26,7 @@ SplitByTimeSlot = true
 Keybind = "P"
 ; Timeout - the time in seconds to show the UI when using the keybind. Default is 5.
 Timeout = 5
+; ShowPackagingDetails - When enabled, the product summary shows packaging details
+ShowPackagingDetails = false
 ```
 

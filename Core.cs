@@ -35,7 +35,7 @@ namespace ProductSum
         public const string Description = "sums your products duh";
         public const string Author = "k073l";
         public const string Company = null;
-        public const string Version = "1.1";
+        public const string Version = "1.2";
         public const string DownloadLink = null;
     }
 
@@ -50,6 +50,7 @@ namespace ProductSum
         private static MelonPreferences_Entry<int> Timeout;
 
         private static MelonPreferences_Entry<bool> SplitByTimeSlot;
+        private static MelonPreferences_Entry<bool> ShowPackagingDetails;
         private GameObject uiContainer;
         private TextMeshProUGUI tmpText;
         private static bool hasPlayerSpawned = false;
@@ -75,6 +76,8 @@ namespace ProductSum
                 "Key to temporarily show the product summary (when not in Always On mode)");
             Timeout = Category.CreateEntry("Timeout", 5,
                 "How many seconds the product summary remains visible after pressing the keybind");
+            ShowPackagingDetails = Category.CreateEntry("ShowPackagingDetails", false,
+                "When enabled, the product summary shows packaging details");
 
 #if MONO
             shouldShowJournalEntryMethod = AccessTools.Method(typeof(Contract), "ShouldShowJournalEntry");
@@ -115,7 +118,7 @@ namespace ProductSum
 
                 if (uiContainer != null)
                     uiContainer.SetActive(false);
-                    GameObject.Destroy(uiContainer);
+                GameObject.Destroy(uiContainer);
                 uiContainer = null;
             }
         }
@@ -217,7 +220,7 @@ namespace ProductSum
         {
             try
             {
-                var productMap = new Dictionary<EDealWindow, Dictionary<string, int>>();
+                var dealInfos = new Dictionary<EDealWindow, AbbreviatedDealInfo>();
                 bool hasValidContracts = false;
                 int validContractCount = 0;
 
@@ -229,18 +232,18 @@ namespace ProductSum
                         bool shouldShow = false;
 
 #if MONO
-                        if (shouldShowJournalEntryMethod != null)
-                        {
-                            try
-                            {
-                                shouldShow = (bool)shouldShowJournalEntryMethod.Invoke(contract, null);
-                            }
-                            catch (Exception ex)
-                            {
-                                MelonLogger.Error($"Reflection error: {ex.Message}");
-                                continue;
-                            }
-                        }
+                if (shouldShowJournalEntryMethod != null)
+                {
+                    try
+                    {
+                        shouldShow = (bool)shouldShowJournalEntryMethod.Invoke(contract, null);
+                    }
+                    catch (Exception ex)
+                    {
+                        MelonLogger.Error($"Reflection error: {ex.Message}");
+                        continue;
+                    }
+                }
 #else
                         try
                         {
@@ -274,14 +277,11 @@ namespace ProductSum
                                 int quantity = entry.Quantity;
 
                                 EDealWindow timeSlot = DealWindowInfo.GetWindow(questWindowConfig.WindowStartTime);
-                                if (!productMap.ContainsKey(timeSlot))
-                                    productMap[timeSlot] = new Dictionary<string, int>();
 
-                                var slotDict = productMap[timeSlot];
-                                if (slotDict.ContainsKey(name))
-                                    slotDict[name] += quantity;
-                                else
-                                    slotDict[name] = quantity;
+                                if (!dealInfos.ContainsKey(timeSlot))
+                                    dealInfos[timeSlot] = new AbbreviatedDealInfo(timeSlot);
+
+                                dealInfos[timeSlot].AddProduct(name, quantity);
                             }
                         }
                     }
@@ -293,32 +293,47 @@ namespace ProductSum
                         sb.AppendLine("Summary:");
                         sb.AppendLine("---------------");
 
+                        bool showPackaging = ShowPackagingDetails.Value;
+
                         if (SplitByTimeSlot.Value)
                         {
-                            foreach (var kvp in productMap)
+                            foreach (var dealInfo in dealInfos.Values)
                             {
-                                string timeSlotLabel = Enum.GetName(typeof(EDealWindow), kvp.Key);
-                                sb.AppendLine($"<u>{timeSlotLabel}</u>");
-                                foreach (var item in kvp.Value)
-                                    sb.AppendLine($"<b>{item.Value}</b>x <i>{item.Key}</i>");
+                                sb.AppendLine(dealInfo.GetFormattedSummary(showPackaging));
                                 sb.AppendLine();
                             }
                         }
                         else
                         {
-                            var merged = new Dictionary<string, int>();
-                            foreach (var slot in productMap.Values)
+                            var combinedDealInfo = new AbbreviatedDealInfo(EDealWindow.Morning); // Dummy time slot
+
+                            // merge all products from all time slots
+                            foreach (var dealInfo in dealInfos.Values)
                             {
-                                foreach (var item in slot)
+                                combinedDealInfo.MergeFrom(dealInfo);
+                            }
+
+                            // display without the time slot header
+                            foreach (var product in combinedDealInfo.Products)
+                            {
+                                if (showPackaging)
                                 {
-                                    if (merged.ContainsKey(item.Key))
-                                        merged[item.Key] += item.Value;
-                                    else
-                                        merged[item.Key] = item.Value;
+                                    sb.Append($"<i>{product.Key}</i>: ");
+                                    var packagingDetails = new List<string>();
+
+                                    foreach (var packaging in product.Value.Items)
+                                    {
+                                        packagingDetails.Add($"<b>{packaging.Value}</b>x {packaging.Key}");
+                                    }
+
+                                    sb.AppendLine(string.Join(", ", packagingDetails));
+                                }
+                                else
+                                {
+                                    int totalQuantity = product.Value.GetTotalQuantity();
+                                    sb.AppendLine($"<b>{totalQuantity}</b>x <i>{product.Key}</i>");
                                 }
                             }
-                            foreach (var item in merged)
-                                sb.AppendLine($"<b>{item.Value}</b>x <i>{item.Key}</i>");
                         }
 
                         tmpText.text = sb.ToString();
@@ -353,7 +368,6 @@ namespace ProductSum
                 MelonLogger.Error($"Error updating product list: {ex.Message}");
             }
         }
-
 
         private KeyCode ParseKeybind(string keybind)
         {
