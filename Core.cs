@@ -7,6 +7,7 @@ using System.Collections;
 using HarmonyLib;
 using TMPro;
 using ScheduleOne;
+using ScheduleOne.Economy;
 using ScheduleOne.Quests;
 using ScheduleOne.Product;
 using ScheduleOne.PlayerScripts;
@@ -14,12 +15,15 @@ using System.Reflection;
 #else
 using Il2CppTMPro;
 using Il2CppScheduleOne;
+using Il2CppScheduleOne.Economy;
 using Il2CppScheduleOne.Quests;
 using Il2CppScheduleOne.Product;
 using Il2CppScheduleOne.PlayerScripts;
 #endif
 
-[assembly: MelonInfo(typeof(ProductSum.ProductSum), ProductSum.BuildInfo.Name, ProductSum.BuildInfo.Version, ProductSum.BuildInfo.Author, ProductSum.BuildInfo.DownloadLink)]
+[assembly:
+    MelonInfo(typeof(ProductSum.ProductSum), ProductSum.BuildInfo.Name, ProductSum.BuildInfo.Version,
+        ProductSum.BuildInfo.Author, ProductSum.BuildInfo.DownloadLink)]
 [assembly: MelonColor(1, 255, 215, 0)]
 [assembly: MelonGame("TVGS", "Schedule I")]
 
@@ -31,17 +35,27 @@ namespace ProductSum
         public const string Description = "sums your products duh";
         public const string Author = "k073l";
         public const string Company = null;
-        public const string Version = "1.0";
+        public const string Version = "1.1";
         public const string DownloadLink = null;
     }
 
     public class ProductSum : MelonMod
     {
         private static MelonLogger.Instance MelonLogger { get; set; }
+        private static MelonPreferences_Category Category;
+        private static MelonPreferences_Entry<bool> AlwaysOn;
+
+        private static MelonPreferences_Entry<string> Keybind;
+
+        private static MelonPreferences_Entry<int> Timeout;
+
+        private static MelonPreferences_Entry<bool> SplitByTimeSlot;
         private GameObject uiContainer;
         private TextMeshProUGUI tmpText;
         private static bool hasPlayerSpawned = false;
         private bool uiCreated = false;
+        private bool timerActive = false;
+        private float timerStartTime = 0f;
 
 #if MONO
         private static MethodInfo shouldShowJournalEntryMethod;
@@ -51,6 +65,16 @@ namespace ProductSum
         {
             MelonLogger = LoggerInstance;
             MelonLogger.Msg("ProductSum initialized!");
+
+            Category = MelonPreferences.CreateCategory("ProductSum", "ProductSum Settings");
+            AlwaysOn = Category.CreateEntry("AlwaysOn", true,
+                "When enabled, the product summary is always visible (when available)");
+            SplitByTimeSlot = Category.CreateEntry("SplitByTimeSlot", true,
+                "When enabled, the product summary is split by time slot");
+            Keybind = Category.CreateEntry("Keybind", "P",
+                "Key to temporarily show the product summary (when not in Always On mode)");
+            Timeout = Category.CreateEntry("Timeout", 5,
+                "How many seconds the product summary remains visible after pressing the keybind");
 
 #if MONO
             shouldShowJournalEntryMethod = AccessTools.Method(typeof(Contract), "ShouldShowJournalEntry");
@@ -162,9 +186,33 @@ namespace ProductSum
         {
             if (!uiCreated || tmpText == null) return;
 
+            if (!AlwaysOn.Value && Input.GetKeyDown(ParseKeybind(Keybind.Value)))
+            {
+                MelonLogger.Msg("were getting into ui with this one");
+                timerActive = true;
+                timerStartTime = Time.time;
+                UpdateProductUI();
+            }
+
+            if (timerActive && Time.time - timerStartTime >= Timeout.Value)
+            {
+                timerActive = false;
+                if (!AlwaysOn.Value)
+                    uiContainer.SetActive(false);
+            }
+
+            if (uiContainer.activeSelf)
+            {
+                UpdateProductUI();
+            }
+        }
+
+
+        private void UpdateProductUI()
+        {
             try
             {
-                Dictionary<string, int> productMap = new Dictionary<string, int>();
+                var productMap = new Dictionary<EDealWindow, Dictionary<string, int>>();
                 bool hasValidContracts = false;
 
                 var contracts = Contract.Contracts;
@@ -175,21 +223,19 @@ namespace ProductSum
                         bool shouldShow = false;
 
 #if MONO
-                        // In Mono, use reflection
-                        if (shouldShowJournalEntryMethod != null)
-                        {
-                            try
-                            {
-                                shouldShow = (bool)shouldShowJournalEntryMethod.Invoke(contract, null);
-                            }
-                            catch (Exception ex)
-                            {
-                                MelonLogger.Error($"Reflection error: {ex.Message}");
-                                continue;
-                            }
-                        }
+                if (shouldShowJournalEntryMethod != null)
+                {
+                    try
+                    {
+                        shouldShow = (bool)shouldShowJournalEntryMethod.Invoke(contract, null);
+                    }
+                    catch (Exception ex)
+                    {
+                        MelonLogger.Error($"Reflection error: {ex.Message}");
+                        continue;
+                    }
+                }
 #else
-                        // On IL2CPP, directly call the method
                         try
                         {
                             shouldShow = contract.ShouldShowJournalEntry();
@@ -206,62 +252,107 @@ namespace ProductSum
 
                         hasValidContracts = true;
                         ProductList productList = contract.ProductList;
+                        QuestWindowConfig questWindowConfig = contract.DeliveryWindow;
 
-                        if (productList != null && productList.entries != null)
+                        if (productList?.entries != null)
                         {
-                            foreach (ProductList.Entry entry in productList.entries)
+                            foreach (var entry in productList.entries)
                             {
                                 var item = Registry.GetItem(entry.ProductID);
-                                if (item != null)
-                                {
-                                    string name = item.Name;
-                                    int quantity = entry.Quantity;
+                                if (item == null) continue;
 
-                                    if (productMap.ContainsKey(name))
-                                        productMap[name] += quantity;
-                                    else
-                                        productMap[name] = quantity;
-                                }
+                                string name = item.Name;
+                                int quantity = entry.Quantity;
+
+                                EDealWindow timeSlot = DealWindowInfo.GetWindow(questWindowConfig.WindowStartTime);
+                                if (!productMap.ContainsKey(timeSlot))
+                                    productMap[timeSlot] = new Dictionary<string, int>();
+
+                                var slotDict = productMap[timeSlot];
+                                if (slotDict.ContainsKey(name))
+                                    slotDict[name] += quantity;
+                                else
+                                    slotDict[name] = quantity;
                             }
                         }
                     }
-
-                    if (hasValidContracts && productMap.Count > 0)
+                    
+                    // merged time slots for alt display and convenience
+                    var merged = new Dictionary<string, int>();
+                    foreach (var slot in productMap.Values)
+                    {
+                        foreach (var item in slot)
+                        {
+                            if (merged.ContainsKey(item.Key))
+                                merged[item.Key] += item.Value;
+                            else
+                                merged[item.Key] = item.Value;
+                        }
+                    }
+                    
+                    // display if we have more than one
+                    if (hasValidContracts && merged.Count > 1)
                     {
                         var sb = new System.Text.StringBuilder();
                         sb.AppendLine("Summary:");
                         sb.AppendLine("---------------");
 
-                        foreach (var kvp in productMap)
+                        if (SplitByTimeSlot.Value)
                         {
-                            sb.AppendLine($"<b>{kvp.Value}</b>x <i>{kvp.Key}</i>");
+                            foreach (var kvp in productMap)
+                            {
+                                string timeSlotLabel = Enum.GetName(typeof(EDealWindow), kvp.Key);
+                                sb.AppendLine($"<u>{timeSlotLabel}</u>");
+                                foreach (var item in kvp.Value)
+                                    sb.AppendLine($"<b>{item.Value}</b>x <i>{item.Key}</i>");
+                                sb.AppendLine();
+                            }
+                        }
+                        else
+                        {
+                            foreach (var item in merged)
+                                sb.AppendLine($"<b>{item.Value}</b>x <i>{item.Key}</i>");
                         }
 
                         tmpText.text = sb.ToString();
 
-                        // resize ui
+                        // resize UI
                         Canvas.ForceUpdateCanvases();
                         float preferredHeight = tmpText.preferredHeight + 20f;
                         var rectTransform = uiContainer.GetComponent<RectTransform>();
                         rectTransform.sizeDelta = new Vector2(rectTransform.sizeDelta.x, preferredHeight);
 
-                        if (!uiContainer.activeSelf)
+                        // toggle UI visibility
+                        bool shouldShow = AlwaysOn.Value || timerActive;
+                        if (shouldShow && !uiContainer.activeSelf)
                             uiContainer.SetActive(true);
+                        else if (!shouldShow && uiContainer.activeSelf)
+                            uiContainer.SetActive(false);
                     }
-                    else if (uiContainer.activeSelf)
+                    else if (uiContainer.activeSelf && !AlwaysOn.Value)
                     {
                         uiContainer.SetActive(false);
+                        timerActive = false;
                     }
                 }
-                else if (uiContainer.activeSelf)
+                else if (uiContainer.activeSelf && !AlwaysOn.Value)
                 {
                     uiContainer.SetActive(false);
+                    timerActive = false;
                 }
             }
-            catch (System.Exception ex)
+            catch (Exception ex)
             {
                 MelonLogger.Error($"Error updating product list: {ex.Message}");
             }
+        }
+
+
+        private KeyCode ParseKeybind(string keybind)
+        {
+            if (System.Enum.TryParse<KeyCode>(keybind, out KeyCode result))
+                return result;
+            return KeyCode.P; // default to p
         }
     }
 }
